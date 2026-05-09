@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - runtime dependency check
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OUTPUT_FILE = "invoice_graph.json"
-GRAPH_SCHEMA_VERSION = "invoice-graph-v1"
+GRAPH_SCHEMA_VERSION = "invoice-graph-v2"
 
 
 TELECOM_INVOICE_DOMAIN_GUIDANCE = """
@@ -46,6 +46,20 @@ Future analysis goals:
 - Preserve enough normalized fields for metrics while keeping source evidence.
 - Keep original labels and descriptions too, because vendor terminology varies.
 
+Preferred graph shape:
+- Use the invoice as the document root: Invoice -> Vendor, Invoice -> InvoiceSummary,
+  Invoice -> BillingPeriod, Invoice -> PaymentTerms, Invoice -> Currency, and
+  Invoice -> RemittanceInstruction when those details exist.
+- Put account and service detail under the vendor, not directly under the invoice:
+  Vendor -> Account -> TelecomService -> UsageMeasurement/Rate/Charge/Discount/TaxOrFee.
+- Connect accounts back to customers with Account -> Customer or Customer -> Account
+  relationships, and preserve bill-to evidence.
+- Treat each invoice line as a TelecomService plus child economics when possible. Keep a
+  ServiceLineItem only as an optional source-line wrapper when the invoice row itself is
+  useful to preserve.
+- Put totals, subtotals, balances, taxes, credits, and due amounts in InvoiceSummary or
+  PaymentSummary nodes and connect summaries to the invoice/account they summarize.
+
 Extraction guidance:
 - Use flexible graph entities; do not force fields that are absent.
 - Normalize numeric amounts when possible, but preserve the original text and currency.
@@ -53,9 +67,9 @@ Extraction guidance:
   unit, rate, discount, amount, currency, charge type, account/customer, and page evidence.
 - Distinguish usage/rate/discount/charge/tax/fee/total when the invoice makes that clear.
 - If a document contains multiple bill-to accounts, treat each account/customer section as
-  its own subgraph connected to the invoice.
-- Prefer relationships that support analytics: invoice contains line item, line item has
-  usage/rate/charge/discount, customer incurred charge, charge appears in summary, etc.
+  its own subgraph under the vendor and link it to the relevant invoice summary.
+- Prefer relationships that support analytics: vendor serves account, account has service,
+  service has usage/rate/charge/discount/tax/fee, and summaries roll up invoice/account totals.
 """
 
 
@@ -74,7 +88,7 @@ def require_langchain_agent() -> None:
 
 def make_llm(model: str, temperature: float) -> ChatOpenAI:
     require_langchain_agent()
-    load_dotenv()
+    load_dotenv(encoding="utf-8-sig")
 
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set. Add it to your .env file.")
@@ -117,6 +131,7 @@ def graph_schema_guidance(_: str = "") -> str:
         {
             "entity_types": [
                 "Invoice",
+                "InvoiceSummary",
                 "Vendor",
                 "Customer",
                 "Account",
@@ -140,8 +155,12 @@ def graph_schema_guidance(_: str = "") -> str:
             ],
             "relationship_types": [
                 "ISSUED_BY",
+                "HAS_SUMMARY",
                 "BILLED_TO",
+                "BILLS_CUSTOMER",
+                "SERVES_ACCOUNT",
                 "HAS_ACCOUNT",
+                "OWNED_BY",
                 "HAS_IDENTIFIER",
                 "HAS_ADDRESS",
                 "HAS_BILLING_PERIOD",
@@ -158,8 +177,27 @@ def graph_schema_guidance(_: str = "") -> str:
                 "HAS_ADJUSTMENT",
                 "HAS_REMITTANCE_INSTRUCTION",
                 "SUMMARIZES",
+                "ROLLS_UP_TO",
                 "APPEARS_ON_PAGE",
                 "NEXT_LINE_ITEM",
+            ],
+            "preferred_topology": [
+                "Invoice -[:ISSUED_BY]-> Vendor",
+                "Invoice -[:HAS_SUMMARY]-> InvoiceSummary",
+                "Invoice -[:HAS_BILLING_PERIOD]-> BillingPeriod",
+                "Invoice -[:HAS_PAYMENT_TERMS]-> PaymentTerms",
+                "Invoice -[:USES_CURRENCY]-> Currency",
+                "Vendor -[:BILLS_CUSTOMER]-> Customer",
+                "Vendor -[:SERVES_ACCOUNT]-> Account",
+                "Account -[:OWNED_BY]-> Customer",
+                "Account -[:USES_SERVICE]-> TelecomService",
+                "TelecomService -[:HAS_USAGE]-> UsageMeasurement",
+                "TelecomService -[:HAS_RATE]-> Rate",
+                "TelecomService -[:HAS_CHARGE]-> Charge",
+                "TelecomService -[:HAS_DISCOUNT]-> Discount",
+                "TelecomService -[:HAS_TAX_OR_FEE]-> TaxOrFee",
+                "PaymentSummary -[:SUMMARIZES]-> Account",
+                "PaymentSummary -[:ROLLS_UP_TO]-> InvoiceSummary",
             ],
             "metric_properties_to_prefer": [
                 "amount",
@@ -181,6 +219,11 @@ def graph_schema_guidance(_: str = "") -> str:
                 "vendor_name",
                 "customer_name",
                 "account_id",
+                "summary_type",
+                "subtotal_amount",
+                "tax_fee_total",
+                "adjustment_total",
+                "total_due",
             ],
             "json_contract": {
                 "schema_version": GRAPH_SCHEMA_VERSION,
@@ -208,6 +251,14 @@ def graph_schema_guidance(_: str = "") -> str:
                         "properties": {},
                         "evidence": [{"page": "page marker or null", "text": "source snippet"}],
                     }
+                ],
+                "hierarchy_rules": [
+                    "One Invoice root per source document.",
+                    "Attach document-level metadata and totals to Invoice through child summary/detail nodes.",
+                    "Attach accounts to Vendor with SERVES_ACCOUNT and customers with BILLS_CUSTOMER/OWNED_BY.",
+                    "Represent each billable service as TelecomService with child economic nodes.",
+                    "Use Charge for monetary line charges, UsageMeasurement for quantities, Rate for prices, Discount for reductions, and TaxOrFee for taxes/surcharges/fees.",
+                    "Use PaymentSummary or InvoiceSummary for account-level and invoice-level rollups.",
                 ],
                 "unresolved": ["items that need review"],
             },
@@ -258,8 +309,11 @@ Rules:
 - Prefer explicit source text over inference.
 - Use stable ids that are safe for graph database imports.
 - Preserve page evidence when page markers are present.
-- Include service line items, charges, usage, rates, discounts, taxes/fees, customers, vendor, invoice metadata, billing period, totals, and payment terms whenever present.
+- Build the graph around this hierarchy: Invoice -> Vendor; Invoice -> InvoiceSummary; Vendor -> Account; Account -> TelecomService; TelecomService -> UsageMeasurement/Rate/Charge/Discount/TaxOrFee.
+- Include service lines, charges, usage, rates, discounts, taxes/fees, customers, accounts, vendor, invoice metadata, billing period, totals, and payment terms whenever present.
 - Include analysis-friendly normalized properties where explicitly supported by the text, such as amount, currency, quantity, unit, rate, rate_unit, discount_percent, service_category, service_code, country_or_region, route, billing period dates, invoice date, due date, vendor, customer, and account identifiers.
+- Prefer separate economic child nodes for usage, rate, charge, discount, tax/fee, adjustment, and summary values instead of storing everything only on one line-item node.
+- Use InvoiceSummary and PaymentSummary nodes for totals, subtotals, prior balances, credits, taxes/fees totals, adjustments, and total due.
 - Keep both normalized values and original source descriptions so invoices from different vendors remain comparable without losing vendor-specific terminology.
 - Think ahead to graph database queries and metric analysis across vendors, customers, months, service categories, and charge types.
 - Add uncertain or missing items to unresolved instead of inventing.

@@ -307,7 +307,7 @@ def assembly_prompt() -> ChatPromptTemplate:
 
 def make_llm(model: str, temperature: float) -> ChatOpenAI:
     require_langchain()
-    load_dotenv()
+    load_dotenv(encoding="utf-8-sig")
 
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set. Add it to your .env file.")

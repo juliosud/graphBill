@@ -23,7 +23,7 @@ class Neo4jConfig:
 
     @classmethod
     def from_env(cls) -> "Neo4jConfig":
-        load_dotenv()
+        load_dotenv(encoding="utf-8-sig")
 
         uri = os.getenv("NEO4J_URI")
         username = os.getenv("NEO4J_USERNAME")
