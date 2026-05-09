@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - runtime dependency check
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OUTPUT_FILE = "invoice_graph.json"
 GRAPH_SCHEMA_VERSION = "invoice-graph-v2"
+DEFAULT_USE_FOREST = True
 
 
 TELECOM_INVOICE_DOMAIN_GUIDANCE = """
@@ -385,7 +386,7 @@ def get_agent_output(result: dict[str, Any]) -> str:
     return str(result)
 
 
-def extract_invoice_graph(
+def extract_invoice_graph_single(
     txt_path: Path,
     output: str | Path = DEFAULT_OUTPUT_FILE,
     model: str = DEFAULT_MODEL,
@@ -426,6 +427,32 @@ def extract_invoice_graph(
     return output_path
 
 
+def extract_invoice_graph(
+    txt_path: Path,
+    output: str | Path = DEFAULT_OUTPUT_FILE,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0,
+    use_forest: bool = DEFAULT_USE_FOREST,
+) -> Path:
+    if not use_forest:
+        return extract_invoice_graph_single(
+            txt_path=txt_path,
+            output=output,
+            model=model,
+            temperature=temperature,
+        )
+
+    from agents.invoice.agentic_forest_graph_agent import extract_invoice_graph_with_forest
+
+    artifacts = extract_invoice_graph_with_forest(
+        txt_path=txt_path,
+        output=output,
+        model=model,
+        temperature=temperature,
+    )
+    return artifacts.final_graph_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract graph-ready JSON from a reconstructed invoice text file."
@@ -447,6 +474,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Model temperature. Defaults to 0 for deterministic extraction.",
     )
+    parser.add_argument(
+        "--disable-forest",
+        action="store_true",
+        help="Use the legacy single-agent extractor instead of the agentic forest.",
+    )
     return parser.parse_args()
 
 
@@ -458,6 +490,7 @@ def main() -> int:
             output=args.output,
             model=args.model,
             temperature=args.temperature,
+            use_forest=not args.disable_forest,
         )
     except Exception as exc:
         print(f"Invoice graph extraction failed: {exc}", file=sys.stderr)
