@@ -1,0 +1,5 @@
+pdfplumber
+langchain
+langchain-openai
+python-dotenv
+neo4j
